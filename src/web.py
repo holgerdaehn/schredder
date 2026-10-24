@@ -22,7 +22,7 @@ def say(msg):
 
 def disk_info(d):
     return dict(id=d["id"], model=d["model"], serial=d["serial"], size=d["size"], size_h=human(d["size"]), bus=d["bus"], kind=d["kind"],
-                volumes=d["volumes"], locked=d["locked"], path=d["path"])
+                volumes=d["volumes"], locked=d["locked"], path=d["path"], setup=ask_info(d))
 
 
 def ask_info(d):
@@ -38,14 +38,17 @@ def ask_info(d):
 class Run:
     """Ein Löschauftrag: startet den Worker, liest dessen Status und bereitet ihn für die Oberfläche auf."""
 
-    def __init__(self, ds, mode, verify, threads, par):
+    def __init__(self, ds, mode, verify, threads, par, plan=None):
         self.ds, self.mode, self.par = ds, mode, par
         self.tmp = tempfile.mkdtemp(prefix="schredder-")
-        self.f_status, self.f_cancel, self.f_setup = (os.path.join(self.tmp, n) for n in ("status.json", "cancel", "setup.json"))
+        self.f_status, self.f_cancel, self.f_setup, self.f_alive = (os.path.join(self.tmp, n) for n in ("status.json", "cancel", "setup.json", "alive"))
+        open(self.f_alive, "w").close()
         shutil.copy2(SCRIPT, os.path.join(self.tmp, "worker.py"))  # Worker läuft aus privater Kopie (kein Zugriffsproblem in Downloads/Desktop)
         job = dict(script=SCRIPT, disks=[{k: d[k] for k in ("id", "path", "size", "model", "serial")} for d in ds], passes=mode["passes"],
-                   verify=verify, threads=threads, parallel=par, status=self.f_status, cancel=self.f_cancel, setup_file=self.f_setup,
+                   verify=verify, threads=threads, parallel=par, status=self.f_status, cancel=self.f_cancel, setup_file=self.f_setup, alive_file=self.f_alive,
                    uid=os.getuid() if hasattr(os, "getuid") else None, gid=os.getgid() if hasattr(os, "getgid") else None)
+        if plan is not None:  # Einrichtung wurde vor dem Löschen festgelegt (leer = nicht einrichten)
+            job["setup_plan"] = plan
         jf = os.path.join(self.tmp, "job.json")
         with open(jf, "w", encoding="utf-8") as f:
             json.dump(job, f)
@@ -73,6 +76,10 @@ class Run:
 
     def _loop(self):
         while not self.done:
+            try:
+                os.utime(self.f_alive)  # Lebenszeichen: der Worker wartet auf die Antwort zur Einrichtung, solange es kommt
+            except OSError:
+                pass
             try:
                 self.poll()
             except Exception as e:  # die Oberfläche darf nie an einem Darstellungsfehler hängen
@@ -285,10 +292,9 @@ class Run:
                     json.dump({"setup": items}, f)
                 os.replace(self.f_setup + ".tmp", self.f_setup)
                 return
-            except FileNotFoundError:
-                return  # Worker hat sich inzwischen beendet (Zeitüberschreitung), der Ordner ist weg
             except OSError:
                 time.sleep(0.05)
+        raise Bad("Die Antwort konnte nicht an den Löschprozess übergeben werden (er läuft vermutlich nicht mehr).", 500)
 
 
 class Bad(Exception):
@@ -340,8 +346,18 @@ class State:
         word = ds[0]["id"] if len(ds) == 1 else str(len(ds))
         if str(p.get("confirm", "")).strip().lower() != word.lower():
             raise Bad("Die Bestätigung stimmt nicht überein.")
+        plan = p.get("setup")
+        if plan is not None:
+            if not isinstance(plan, list):
+                raise Bad("Ungültige Angaben für die Einrichtung.")
+            for it in plan:
+                d = self.disks.get(it.get("id")) if isinstance(it, dict) else None
+                if d is None or d not in ds or it.get("scheme") not in SCHEME_NAME or it.get("fs") not in setup_fs(d) or (
+                        it["scheme"] == "mbr" and (d["size"] > MBR_MAX or it["fs"] == "apfs")):
+                    raise Bad("Ungültige Angaben für die Einrichtung.")
+            plan = [dict(id=it["id"], scheme=it["scheme"], fs=it["fs"], label=str(it.get("label") or "")[:64]) for it in plan]
         try:
-            self.run = Run(ds, MODES[mode], bool(p.get("verify", True)), threads, par)
+            self.run = Run(ds, MODES[mode], bool(p.get("verify", True)), threads, par, plan)
         except Exception as e:
             raise Bad(f"Löschprozess konnte nicht gestartet werden: {e}", 500)
 
@@ -442,7 +458,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.send(200, dict(ok=True))
             if post and path == "/api/setup":
                 if not (app.busy and isinstance(p.get("items"), list)):
-                    raise Bad("Keine Einrichtung angefragt.", 409)
+                    raise Bad("Der Löschvorgang ist bereits beendet, die Einrichtung ist nicht mehr möglich. "
+                              f"Der Datenträger kann mit {SETUP_TOOL[PLATFORM]} eingerichtet werden.", 409)
                 app.run.answer_setup(p["items"])
                 return self.send(200, dict(ok=True))
             if post and path == "/api/back":

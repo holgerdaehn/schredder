@@ -120,8 +120,12 @@ function renderModes() {
 }
 
 // ───── Bestätigung und Start ─────
-function confirmDialog() {
+function confirmDialog(plan) {
   const sel = selected(), n = sel.length, word = n === 1 ? sel[0].id : String(n), mode = S.info.modes[S.mode];
+  const planText = (x) => {
+    const it = plan.find((p) => p.id === x.id), f = it && x.setup.fs.find((q) => q.key === it.fs);
+    return it ? `Danach: als neues Laufwerk einrichten – ${it.scheme.toUpperCase()}, ${f ? f.name : it.fs}, Name „${it.label}“` : "Danach: nicht einrichten (der Datenträger bleibt leer und im System unsichtbar)";
+  };
   const verify = $("o-verify").checked, par = n > 1 && $("o-flow").value === "true", d = $("d-confirm");
   const input = h("input", { type: "text", autocomplete: "off", spellcheck: "false", "aria-label": "Bestätigung" });
   const ok = h("button", { class: "btn danger", type: "button", disabled: true }, "Endgültig löschen");
@@ -130,7 +134,7 @@ function confirmDialog() {
   ok.addEventListener("click", async () => {
     ok.disabled = true;
     try {
-      await api("start", { ids: sel.map((x) => x.id), mode: S.mode, verify, threads: Number($("o-perf").value), parallel: par, confirm: input.value });
+      await api("start", { ids: sel.map((x) => x.id), mode: S.mode, verify, threads: Number($("o-perf").value), parallel: par, confirm: input.value, setup: plan });
       d.close();
       S.view = { state: "launching" };
       showRun();
@@ -138,7 +142,7 @@ function confirmDialog() {
   });
   d.replaceChildren(h("div", { class: "dlg" },
     h("h3", { class: "red" }, n === 1 ? "Datenträger endgültig löschen?" : `${n} Datenträger endgültig löschen?`),
-    h("div", { class: "box" }, sel.flatMap((x) => [h("b", {}, `${x.id}  ·  ${x.model || "Unbekanntes Modell"}  ·  ${x.size_h}`), h("small", {}, "Inhalt: " + (x.volumes.join(", ") || "keine erkennbaren Laufwerke"))]),
+    h("div", { class: "box" }, sel.flatMap((x) => [h("b", {}, `${x.id}  ·  ${x.model || "Unbekanntes Modell"}  ·  ${x.size_h}`), h("small", {}, "Inhalt: " + (x.volumes.join(", ") || "keine erkennbaren Laufwerke")), h("small", {}, planText(x))]),
       h("small", {}, `Methode: ${mode.name} (${mode.passes.join(" → ")})` + (verify ? "  +  Prüfung" : "") + (n > 1 ? `  ·  ${par ? "gleichzeitig" : "nacheinander"}` : ""))),
     h("p", {}, (n === 1 ? "Alle Daten gehen unwiderruflich verloren. " : `Alle Daten auf diesen ${n} Datenträgern gehen unwiderruflich verloren. `)
       + (n === 1 ? `Zur Bestätigung „${word}“ eingeben:` : `Zur Bestätigung die Anzahl „${word}“ eingeben:`)),
@@ -216,10 +220,11 @@ async function pollLoop() {
 }
 
 // ───── Einrichtung als Laufwerk ─────
-function askSetup(items) {
+// Dialog mit Format-Vorschlag je Datenträger; liefert die Wahl (Liste) oder o.decline / o.esc
+function pickSetup(items, o) {
   return new Promise((resolve) => {
     const d = $("d-setup");
-    let sent = false;
+    let done = false;
     const rows = items.map((it) => {
       const on = h("input", { type: "checkbox" }), fs = h("select"), sch = h("select"), label = h("input", { type: "text", size: "14", maxlength: "32", "aria-label": "Name" });
       const why = h("div", { class: "why" });
@@ -241,20 +246,32 @@ function askSetup(items) {
         el: h("div", { class: "sdisk" }, h("label", {}, on, `${it.id}  ·  ${it.model}  ·  ${it.size_h}`),
           h("div", { class: "ctl" }, h("label", {}, "Partitionstabelle", sch), h("label", {}, "Dateisystem", fs), h("label", {}, "Name", label)), why) };
     });
-    const send = async (list) => {
-      if (sent) return;
-      sent = true;
-      try { await api("setup", { items: list }); } catch (e) { /* Worker ist schon fertig */ }
-      d.close(); resolve();
+    const finish = (v) => {
+      if (done) return;
+      done = true; d.close(); resolve(v);
     };
-    d.addEventListener("close", () => send([]), { once: true }); // Esc oder Schließen = nicht einrichten
-    d.replaceChildren(h("div", { class: "dlg" }, h("h3", {}, "Als neues Laufwerk einrichten?"),
-      h("p", { class: "mute" }, "Gelöschte Datenträger sind leer und im System nicht mehr als Laufwerk sichtbar. Schredder kann sie jetzt neu einrichten (Partitionstabelle und Dateisystem). Das passende Format wurde nach Art und Größe des Datenträgers und nach Betriebssystem erkannt; es lässt sich ändern."),
-      rows.map((r) => r.el),
-      h("div", { class: "btns" }, h("button", { class: "btn", type: "button", onclick: () => send([]) }, "Nicht einrichten"),
-        h("button", { class: "btn primary", type: "button", onclick: () => send(rows.filter((r) => r.on.checked).map((r) => ({ id: r.id, scheme: r.sch.value, fs: r.fs.value, label: r.label.value }))) }, "Einrichten"))));
+    d.addEventListener("close", () => finish(o.esc), { once: true }); // Esc oder Schließen
+    d.replaceChildren(h("div", { class: "dlg" }, h("h3", {}, o.title), h("p", { class: "mute" }, o.intro), rows.map((r) => r.el),
+      h("div", { class: "btns" }, h("button", { class: "btn", type: "button", onclick: () => finish(o.decline) }, o.no),
+        h("button", { class: "btn primary", type: "button", onclick: () => finish(rows.filter((r) => r.on.checked).map((r) => ({ id: r.id, scheme: r.sch.value, fs: r.fs.value, label: r.label.value }))) }, o.ok))));
     d.showModal();
   });
+}
+
+// Rückfrage nach dem Löschen – nur noch, wenn die Einrichtung nicht schon vor dem Start festgelegt wurde
+async function askSetup(items) {
+  const list = await pickSetup(items, { title: "Als neues Laufwerk einrichten?", ok: "Einrichten", no: "Nicht einrichten", decline: [], esc: [],
+    intro: "Gelöschte Datenträger sind leer und im System nicht mehr als Laufwerk sichtbar. Schredder kann sie jetzt neu einrichten (Partitionstabelle und Dateisystem). Das passende Format wurde nach Art und Größe des Datenträgers und nach Betriebssystem erkannt; es lässt sich ändern." });
+  try { await api("setup", { items: list }); } catch (e) { msg("Einrichtung nicht möglich", e.message, "OK"); }
+}
+
+// Einrichtung vor dem Start festlegen: null = Vorgang abbrechen
+async function planSetup(sel) {
+  const how = $("o-setup").value;
+  if (how === "none") return [];
+  if (how === "auto") return sel.map((d) => ({ id: d.id, scheme: d.setup.rec.scheme, fs: d.setup.rec.fs, label: d.setup.label }));
+  return pickSetup(sel.map((d) => d.setup), { title: "Format für die neuen Laufwerke wählen", ok: "Weiter", no: "Abbrechen", decline: null, esc: null,
+    intro: "Nach dem Löschen richtet Schredder die Datenträger so ein. Die Vorschläge richten sich nach Art, Größe und Betriebssystem; abgewählte Datenträger bleiben leer." });
 }
 
 // ───── Protokoll, Verbindung, Start ─────
@@ -284,7 +301,10 @@ async function init() {
   renderModes();
   $("b-all").addEventListener("click", () => { S.sel = new Set(S.disks.filter((d) => !d.locked).map((d) => d.id)); S.peek = null; renderDisks(); updateSel(); });
   $("b-refresh").addEventListener("click", scan);
-  $("b-go").addEventListener("click", confirmDialog);
+  $("b-go").addEventListener("click", async () => {
+    const plan = await planSetup(selected());
+    if (plan) confirmDialog(plan);
+  });
   $("b-cancel").addEventListener("click", async () => {
     if (!(await msg("Löschvorgang abbrechen?", "Bereits begonnene Datenträger bleiben teilweise überschrieben.", "Ja, abbrechen", "Weiter löschen"))) return;
     try { await api("cancel", {}); } catch (e) { msg("Abbrechen nicht möglich", e.message, "OK"); }

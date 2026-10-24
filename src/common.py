@@ -11,7 +11,7 @@ import ctypes, errno, json, mmap, os, platform, random, re, shutil, subprocess, 
 from collections import deque
 from datetime import datetime
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 SCRIPT = os.path.abspath(__file__)
 CHUNK = 4 << 20        # 4 MiB pro Schreib-/Lesevorgang (Vielfaches jeder Sektorgröße)
 POOL = 64 << 20        # Zufallspool: einmal vom Betriebssystem, dann laufend erneuert
@@ -27,7 +27,8 @@ MODES = [
 PASS_NAME = {"zero": "Nullen", "random": "Zufallsdaten"}
 MBR_MAX = 2 * 1024 ** 4      # MBR adressiert höchstens 2 TiB
 FAT32_MAX = 32 * 1024 ** 3   # größere FAT32-Volumes erzeugt weder der Windows-Formatierer noch die SD-Norm
-SETUP_WAIT = 600             # so lange wartet der Worker auf die Antwort zur Einrichtung (Sekunden)
+ALIVE_POLLS = 1500  # Durchläufe à 0,4 s ohne Lebenszeichen der Oberfläche (ca. 10 Minuten), dann gibt der Worker auf
+SETUP_WAIT = 600             # Frist für die Antwort zur Einrichtung, wenn keine alive-Datei vorhanden ist (Sekunden)
 SCHEME_NAME = {"gpt": "GPT", "mbr": "MBR"}
 SCHEME_WHY = {"gpt": "GPT – Standard moderner Systeme", "mbr": "MBR – läuft auch an älteren Geräten (Fernseher, Auto, Kamera)"}
 FS_NAME = {"ntfs": "NTFS", "exfat": "exFAT", "fat32": "FAT32", "ext4": "ext4", "apfs": "APFS", "hfs": "Mac OS Extended"}
@@ -384,14 +385,27 @@ def run_all(job, disks, st, cancel):
 
 
 def wait_decision(job, cancel):
-    """Wartet auf die Antwort der Oberfläche (Datei setup.json); None bei Zeitüberschreitung oder Abbruch."""
-    end = time.time() + SETUP_WAIT
-    while time.time() < end and not cancel():
+    """Wartet auf die Antwort der Oberfläche (Datei setup.json). Nach einem langen Lauf kann es Stunden dauern, bis jemand
+    antwortet: Der Worker wartet daher, solange die Oberfläche lebt (sie berührt laufend die Datei alive). None bei Abbruch
+    oder wenn die Oberfläche weg ist; ohne alive-Datei gilt die feste Frist SETUP_WAIT."""
+    end, alive, last, quiet = time.time() + SETUP_WAIT, job.get("alive_file"), None, 0
+    while not cancel():
         try:
             with open(job["setup_file"], encoding="utf-8") as f:
                 return json.load(f)
         except (OSError, ValueError):
-            time.sleep(0.4)
+            pass
+        if alive:
+            try:
+                mark = os.stat(alive).st_mtime_ns
+            except OSError:
+                mark = None
+            quiet, last = (0 if mark != last else quiet + 1), mark  # gezählt wird je Durchlauf, nicht nach Uhrzeit (Ruhezustand!)
+            if quiet > ALIVE_POLLS:
+                return None
+        elif time.time() > end:
+            return None
+        time.sleep(0.4)
     return None
 
 
@@ -429,12 +443,16 @@ def worker(jobfile):
             st.disk(i, state="error", error=msg, modified=False)
         run_all(job, ok, st, cancel)
         wiped = [i for i in ok if st.d["disks"][i].get("state") == "done"]
-        if wiped and job.get("setup_file") and not cancel():  # gelöschte Datenträger sind leer und unsichtbar: Einrichtung anbieten
-            st.set(tries=40, state="ask", ask=wiped)
-            decision = wait_decision(job, cancel)
-            if decision and decision.get("setup"):
-                st.set(tries=40, state="setup")
-                apply_setup(job, ok, decision, st)
+        decision = None
+        if wiped and not cancel():
+            if "setup_plan" in job:  # vor dem Löschen festgelegt: nichts mehr abwarten
+                decision = {"setup": job["setup_plan"]}
+            elif job.get("setup_file"):  # gelöschte Datenträger sind leer und unsichtbar: Einrichtung anbieten
+                st.set(tries=40, state="ask", ask=wiped)
+                decision = wait_decision(job, cancel)
+        if decision and decision.get("setup"):
+            st.set(tries=40, state="setup")
+            apply_setup(job, ok, decision, st)
         st.set(tries=40, state="cancelled" if cancel() else "done")
         return 0
     except BaseException as e:

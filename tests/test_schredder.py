@@ -22,7 +22,7 @@ TARGET = os.environ.get("SCHREDDER_TARGET") or NATIVE
 spec = importlib.util.spec_from_file_location("schredder", os.path.join(ROOT, TARGET, "schredder.py"))
 s = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(s)
-ORIG = {k: getattr(s, k) for k in ("is_admin", "prepare", "preflight", "open_dev", "write_pass", "list_disks", "inhibit_sleep", "setup_disk", "SETUP_WAIT",
+ORIG = {k: getattr(s, k) for k in ("ALIVE_POLLS", "is_admin", "prepare", "preflight", "open_dev", "write_pass", "list_disks", "inhibit_sleep", "setup_disk", "SETUP_WAIT",
                                     "launch_worker", "after_setup", "SCRIPT")}
 KB = 4096  # alle Größen: Vielfache von 4 KiB (ungepufferte E/A verlangt Sektorgrenzen)
 
@@ -55,6 +55,9 @@ class Base(unittest.TestCase):
                    cancel=os.path.join(self.tmp, "cancel"))
         if setup:  # Einrichtung als Laufwerk anbieten (wartet auf setup.json)
             job["setup_file"] = os.path.join(self.tmp, "setup.json")
+            if setup == "alive":  # Oberfläche meldet sich laufend (Datei alive) – wie im echten Betrieb
+                job["alive_file"] = os.path.join(self.tmp, "alive")
+                open(job["alive_file"], "w").close()
         jf = os.path.join(self.tmp, "job.json")
         with open(jf, "w") as f:
             json.dump(job, f)
@@ -251,6 +254,29 @@ class Setup(Base):
         rc, st = self.run_job(self.disks(1 << 20), setup=True)
         self.assertEqual((rc, st["state"], self.setups), (0, "done", []))
 
+    def test_waits_as_long_as_the_interface_lives(self):
+        s.SETUP_WAIT = 0.5  # ohne Lebenszeichen wäre nach 0,5 s Schluss
+        alive, stop = os.path.join(self.tmp, "alive"), threading.Event()
+        fs = s.setup_fs({"size": 1 << 20, "kind": "Flash", "bus": "USB"})[0]
+
+        def beat():
+            while not stop.wait(0.1):
+                os.utime(alive)
+        t = threading.Thread(target=beat)
+        t.start()
+        self.addCleanup(t.join)
+        self.addCleanup(stop.set)
+        self.gui(lambda: (time.sleep(2), self.answer([dict(id="d0", scheme="gpt", fs=fs, label="spaet")])))  # Antwort erst nach 2 s
+        rc, st = self.run_job(self.disks(1 << 20), setup="alive")
+        self.assertEqual((st["disks"]["d0"]["setup"], len(self.setups)), ("done", 1))
+
+    def test_gives_up_when_the_interface_is_gone(self):
+        s.ALIVE_POLLS = 5  # kein Lebenszeichen: nach etwa 2 s aufgeben
+        t0 = time.time()
+        rc, st = self.run_job(self.disks(1 << 20), setup="alive")
+        self.assertEqual((rc, st["state"], self.setups), (0, "done", []))
+        self.assertLess(time.time() - t0, 10)
+
     def test_cancel_while_asking(self):
         self.gui(lambda: open(os.path.join(self.tmp, "cancel"), "w").close())
         rc, st = self.run_job(self.disks(1 << 20), setup=True)
@@ -385,7 +411,9 @@ class Web(Base):
             self.assertEqual(st, 400, (bad, body))
             self.assertIn("error", body)
         self.assertEqual(self.call("GET", "/api/run")[1], dict(state="idle"))
-        self.assertEqual(self.post("/api/setup", {"items": []})[0], 409)  # keine Einrichtung angefragt
+        st, body, _ = self.post("/api/setup", {"items": []})  # keine Einrichtung angefragt
+        self.assertEqual(st, 409)
+        self.assertIn("nicht mehr möglich", body["error"])
         self.assertEqual(self.calls, [])
         self.assertEqual([self.data(d["path"]) for d in ds], before)
         self.assertEqual(self.post("/api/start", dict(ok, confirm="D0"))[0], 200)  # Groß-/Kleinschreibung egal
@@ -416,6 +444,27 @@ class Web(Base):
         self.assertEqual(self.post("/api/back")[0], 200)
         self.assertEqual(self.call("GET", "/api/run")[1], dict(state="idle"))
         self.assertEqual(self.call("GET", "/api/report")[0], 404)
+
+    def test_setup_chosen_before_start_needs_no_answer_afterwards(self):
+        ds = self.disks(2 << 20, 2 << 20)
+        fs = s.setup_fs(ds[0])[0]
+        self.assertEqual(self.start(ds, setup=[dict(id="d0", scheme="gpt", fs=fs, label="Vorab")])[0], 200)
+        v = self.wait_for("finished")  # nie „ask“: es wird nichts mehr abgefragt
+        self.assertEqual(self.setups, [("d0", "gpt", fs, s.clean_label(fs, "Vorab"))])
+        self.assertIn("• d1: nicht eingerichtet", v["result"]["text"])
+        self.post("/api/back")
+        self.assertEqual(self.start(ds, setup=[])[0], 200)  # leer = nicht einrichten
+        v = self.wait_for("finished")
+        self.assertEqual((len(self.setups), v["result"]["kind"]), (1, "ok"))
+        self.assertIn("jetzt leer", v["result"]["text"])
+
+    def test_invalid_setup_plan_is_refused(self):
+        ds = self.disks(2 << 20)
+        fs = s.setup_fs(ds[0])[0]
+        for bad in ("x", [dict(id="d0", scheme="gpt", fs="reiserfs")], [dict(id="d0", scheme="xyz", fs=fs)], [dict(id="nix", scheme="gpt", fs=fs)], ["d0"],
+                    [dict(id="d0", scheme="mbr", fs="apfs")]):
+            self.assertEqual(self.start(ds, setup=bad)[0], 400, bad)
+        self.assertEqual(self.call("GET", "/api/run")[1], dict(state="idle"))
 
     def test_decline_setup_and_second_run(self):
         (d,) = self.disks(1 << 20)

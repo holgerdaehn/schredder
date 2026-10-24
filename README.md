@@ -34,11 +34,13 @@ Download als ZIP ggf. `chmod +x Schredder.command` bzw. `chmod +x Schredder.sh` 
 
 1. **Datenträger wählen** – einen oder mehrere anhaken (oder „Alle auswählen“). Angezeigt werden Name, Modell, Größe, Typ
    und Inhalt (Laufwerksbuchstaben bzw. Volumes).
-2. **Methode wählen**, optional die Prüfung und bei mehreren Datenträgern den Ablauf (gleichzeitig/nacheinander).
+2. **Methode wählen**, optional die Prüfung, bei mehreren Datenträgern den Ablauf (gleichzeitig/nacheinander) und **was danach
+   passiert**: als neues Laufwerk einrichten (empfohlenes Format oder selbst gewählt) oder nicht einrichten.
 3. **Löschen …** klicken und bestätigen: bei einem Datenträger dessen Namen, bei mehreren deren Anzahl eintippen.
    Fortschritt, Geschwindigkeit und Restzeit werden je Datenträger und gesamt live angezeigt.
-4. **Danach** fragt Schredder, ob die Datenträger **als neues Laufwerk eingerichtet** werden sollen (siehe unten). Ein
-   **Löschprotokoll** (Textdatei, ein Abschnitt je Datenträger) lässt sich anschließend speichern.
+4. **Danach** richtet Schredder die Datenträger wie vorab festgelegt **als neues Laufwerk** ein (siehe unten) – es muss also
+   niemand nach einem stundenlangen Lauf noch etwas bestätigen. Ein **Löschprotokoll** (Textdatei, ein Abschnitt je
+   Datenträger) lässt sich anschließend speichern.
 
 | Methode | Durchgänge | Einsatz |
 |---|---|---|
@@ -51,13 +53,14 @@ und meldet einen Fehler, sobald ein Byte ungleich 0 ist.
 
 ## Als neues Laufwerk einrichten
 
-Ein gelöschter Datenträger ist leer und im System nicht mehr als Laufwerk sichtbar. Deshalb fragt Schredder nach dem Löschen,
-ob er neu eingerichtet werden soll (Partitionstabelle + schnell formatiertes Dateisystem, eine Partition über den ganzen
-Datenträger). Das passende Format wird nach Art und Größe des Datenträgers und nach Betriebssystem **automatisch erkannt**
-und vorgeschlagen; Partitionstabelle, Dateisystem und Name lassen sich je Datenträger ändern. Es ist keine zweite
-Rechte-Abfrage nötig, und nichts passiert ohne Bestätigung.
+Ein gelöschter Datenträger ist leer und im System nicht mehr als Laufwerk sichtbar. Deshalb legst du **vor dem Start** unter
+„Nach dem Löschen“ fest, ob Schredder ihn neu einrichten soll (Partitionstabelle + schnell formatiertes Dateisystem, eine Partition
+über den ganzen Datenträger). Das passende Format wird nach Art und Größe des Datenträgers und nach Betriebssystem
+**automatisch erkannt**; mit „Format selbst wählen“ lassen sich Partitionstabelle, Dateisystem und Name je Datenträger ändern.
+Das gewählte Format steht im Bestätigungsdialog vor dem Löschen. Es ist keine zweite Rechte-Abfrage nötig, und eingerichtet
+werden nur Datenträger, die erfolgreich gelöscht wurden.
 
-![Schredder fragt nach dem Löschen, ob die Datenträger als neues Laufwerk eingerichtet werden sollen (macOS, Beispieldaten)](docs/screenshot-macos-einrichten.png)
+![Vor dem Löschen das Format der neuen Laufwerke wählen (macOS, Beispieldaten)](docs/screenshot-macos-einrichten.png)
 
 | Datenträger | Partitionstabelle | Dateisystem |
 |---|---|---|

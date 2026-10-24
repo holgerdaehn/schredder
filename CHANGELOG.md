@@ -3,6 +3,16 @@
 Alle nennenswerten Änderungen an diesem Projekt. Das Format folgt
 [Keep a Changelog](https://keepachangelog.com/de/1.1.0/), die Versionierung [SemVer](https://semver.org/lang/de/).
 
+## [1.0.1] – 2026-10-24
+
+### Behoben
+- Die Einrichtung als neues Laufwerk wurde nach langen Löschvorgängen nicht ausgeführt: Der Löschprozess wartete nur
+  10 Minuten auf die Antwort und beendete sich dann, die spätere Antwort ging ins Leere und die Fehlermeldung wurde
+  verschluckt. Jetzt wird die Einrichtung **vor dem Löschen** festgelegt (Option „Nach dem Löschen“: empfohlenes Format,
+  selbst wählen oder nicht einrichten) und danach ohne Rückfrage ausgeführt; das gewählte Format steht im
+  Bestätigungsdialog. Wird doch noch nachgefragt, wartet der Prozess, solange die Oberfläche offen ist, und Fehler werden
+  als Dialog angezeigt.
+
 ## [1.0.0] – 2026-10-24
 
 Erste Veröffentlichung.
@@ -31,4 +41,5 @@ Erste Veröffentlichung.
 - Entwicklung: gemeinsamer Quellcode in `src/` mit `build.py` (erzeugt je System eine eigenständige Datei), Tests (Engine,
   Worker, HTTP-Schnittstelle) und CI mit Python 3.9 und der jeweils neuesten 3.x unter Linux, Windows und macOS.
 
+[1.0.1]: https://github.com/holgerdaehn/schredder/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/holgerdaehn/schredder/releases/tag/v1.0.0

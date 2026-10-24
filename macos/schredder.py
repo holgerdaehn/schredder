@@ -12,7 +12,7 @@ import ctypes, errno, json, mmap, os, platform, random, re, shutil, subprocess, 
 from collections import deque
 from datetime import datetime
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 SCRIPT = os.path.abspath(__file__)
 CHUNK = 4 << 20        # 4 MiB pro Schreib-/Lesevorgang (Vielfaches jeder Sektorgröße)
 POOL = 64 << 20        # Zufallspool: einmal vom Betriebssystem, dann laufend erneuert
@@ -28,7 +28,8 @@ MODES = [
 PASS_NAME = {"zero": "Nullen", "random": "Zufallsdaten"}
 MBR_MAX = 2 * 1024 ** 4      # MBR adressiert höchstens 2 TiB
 FAT32_MAX = 32 * 1024 ** 3   # größere FAT32-Volumes erzeugt weder der Windows-Formatierer noch die SD-Norm
-SETUP_WAIT = 600             # so lange wartet der Worker auf die Antwort zur Einrichtung (Sekunden)
+ALIVE_POLLS = 1500  # Durchläufe à 0,4 s ohne Lebenszeichen der Oberfläche (ca. 10 Minuten), dann gibt der Worker auf
+SETUP_WAIT = 600             # Frist für die Antwort zur Einrichtung, wenn keine alive-Datei vorhanden ist (Sekunden)
 SCHEME_NAME = {"gpt": "GPT", "mbr": "MBR"}
 SCHEME_WHY = {"gpt": "GPT – Standard moderner Systeme", "mbr": "MBR – läuft auch an älteren Geräten (Fernseher, Auto, Kamera)"}
 FS_NAME = {"ntfs": "NTFS", "exfat": "exFAT", "fat32": "FAT32", "ext4": "ext4", "apfs": "APFS", "hfs": "Mac OS Extended"}
@@ -385,14 +386,27 @@ def run_all(job, disks, st, cancel):
 
 
 def wait_decision(job, cancel):
-    """Wartet auf die Antwort der Oberfläche (Datei setup.json); None bei Zeitüberschreitung oder Abbruch."""
-    end = time.time() + SETUP_WAIT
-    while time.time() < end and not cancel():
+    """Wartet auf die Antwort der Oberfläche (Datei setup.json). Nach einem langen Lauf kann es Stunden dauern, bis jemand
+    antwortet: Der Worker wartet daher, solange die Oberfläche lebt (sie berührt laufend die Datei alive). None bei Abbruch
+    oder wenn die Oberfläche weg ist; ohne alive-Datei gilt die feste Frist SETUP_WAIT."""
+    end, alive, last, quiet = time.time() + SETUP_WAIT, job.get("alive_file"), None, 0
+    while not cancel():
         try:
             with open(job["setup_file"], encoding="utf-8") as f:
                 return json.load(f)
         except (OSError, ValueError):
-            time.sleep(0.4)
+            pass
+        if alive:
+            try:
+                mark = os.stat(alive).st_mtime_ns
+            except OSError:
+                mark = None
+            quiet, last = (0 if mark != last else quiet + 1), mark  # gezählt wird je Durchlauf, nicht nach Uhrzeit (Ruhezustand!)
+            if quiet > ALIVE_POLLS:
+                return None
+        elif time.time() > end:
+            return None
+        time.sleep(0.4)
     return None
 
 
@@ -430,12 +444,16 @@ def worker(jobfile):
             st.disk(i, state="error", error=msg, modified=False)
         run_all(job, ok, st, cancel)
         wiped = [i for i in ok if st.d["disks"][i].get("state") == "done"]
-        if wiped and job.get("setup_file") and not cancel():  # gelöschte Datenträger sind leer und unsichtbar: Einrichtung anbieten
-            st.set(tries=40, state="ask", ask=wiped)
-            decision = wait_decision(job, cancel)
-            if decision and decision.get("setup"):
-                st.set(tries=40, state="setup")
-                apply_setup(job, ok, decision, st)
+        decision = None
+        if wiped and not cancel():
+            if "setup_plan" in job:  # vor dem Löschen festgelegt: nichts mehr abwarten
+                decision = {"setup": job["setup_plan"]}
+            elif job.get("setup_file"):  # gelöschte Datenträger sind leer und unsichtbar: Einrichtung anbieten
+                st.set(tries=40, state="ask", ask=wiped)
+                decision = wait_decision(job, cancel)
+        if decision and decision.get("setup"):
+            st.set(tries=40, state="setup")
+            apply_setup(job, ok, decision, st)
         st.set(tries=40, state="cancelled" if cancel() else "done")
         return 0
     except BaseException as e:
@@ -618,7 +636,7 @@ def say(msg):
 
 def disk_info(d):
     return dict(id=d["id"], model=d["model"], serial=d["serial"], size=d["size"], size_h=human(d["size"]), bus=d["bus"], kind=d["kind"],
-                volumes=d["volumes"], locked=d["locked"], path=d["path"])
+                volumes=d["volumes"], locked=d["locked"], path=d["path"], setup=ask_info(d))
 
 
 def ask_info(d):
@@ -634,14 +652,17 @@ def ask_info(d):
 class Run:
     """Ein Löschauftrag: startet den Worker, liest dessen Status und bereitet ihn für die Oberfläche auf."""
 
-    def __init__(self, ds, mode, verify, threads, par):
+    def __init__(self, ds, mode, verify, threads, par, plan=None):
         self.ds, self.mode, self.par = ds, mode, par
         self.tmp = tempfile.mkdtemp(prefix="schredder-")
-        self.f_status, self.f_cancel, self.f_setup = (os.path.join(self.tmp, n) for n in ("status.json", "cancel", "setup.json"))
+        self.f_status, self.f_cancel, self.f_setup, self.f_alive = (os.path.join(self.tmp, n) for n in ("status.json", "cancel", "setup.json", "alive"))
+        open(self.f_alive, "w").close()
         shutil.copy2(SCRIPT, os.path.join(self.tmp, "worker.py"))  # Worker läuft aus privater Kopie (kein Zugriffsproblem in Downloads/Desktop)
         job = dict(script=SCRIPT, disks=[{k: d[k] for k in ("id", "path", "size", "model", "serial")} for d in ds], passes=mode["passes"],
-                   verify=verify, threads=threads, parallel=par, status=self.f_status, cancel=self.f_cancel, setup_file=self.f_setup,
+                   verify=verify, threads=threads, parallel=par, status=self.f_status, cancel=self.f_cancel, setup_file=self.f_setup, alive_file=self.f_alive,
                    uid=os.getuid() if hasattr(os, "getuid") else None, gid=os.getgid() if hasattr(os, "getgid") else None)
+        if plan is not None:  # Einrichtung wurde vor dem Löschen festgelegt (leer = nicht einrichten)
+            job["setup_plan"] = plan
         jf = os.path.join(self.tmp, "job.json")
         with open(jf, "w", encoding="utf-8") as f:
             json.dump(job, f)
@@ -669,6 +690,10 @@ class Run:
 
     def _loop(self):
         while not self.done:
+            try:
+                os.utime(self.f_alive)  # Lebenszeichen: der Worker wartet auf die Antwort zur Einrichtung, solange es kommt
+            except OSError:
+                pass
             try:
                 self.poll()
             except Exception as e:  # die Oberfläche darf nie an einem Darstellungsfehler hängen
@@ -881,10 +906,9 @@ class Run:
                     json.dump({"setup": items}, f)
                 os.replace(self.f_setup + ".tmp", self.f_setup)
                 return
-            except FileNotFoundError:
-                return  # Worker hat sich inzwischen beendet (Zeitüberschreitung), der Ordner ist weg
             except OSError:
                 time.sleep(0.05)
+        raise Bad("Die Antwort konnte nicht an den Löschprozess übergeben werden (er läuft vermutlich nicht mehr).", 500)
 
 
 class Bad(Exception):
@@ -936,8 +960,18 @@ class State:
         word = ds[0]["id"] if len(ds) == 1 else str(len(ds))
         if str(p.get("confirm", "")).strip().lower() != word.lower():
             raise Bad("Die Bestätigung stimmt nicht überein.")
+        plan = p.get("setup")
+        if plan is not None:
+            if not isinstance(plan, list):
+                raise Bad("Ungültige Angaben für die Einrichtung.")
+            for it in plan:
+                d = self.disks.get(it.get("id")) if isinstance(it, dict) else None
+                if d is None or d not in ds or it.get("scheme") not in SCHEME_NAME or it.get("fs") not in setup_fs(d) or (
+                        it["scheme"] == "mbr" and (d["size"] > MBR_MAX or it["fs"] == "apfs")):
+                    raise Bad("Ungültige Angaben für die Einrichtung.")
+            plan = [dict(id=it["id"], scheme=it["scheme"], fs=it["fs"], label=str(it.get("label") or "")[:64]) for it in plan]
         try:
-            self.run = Run(ds, MODES[mode], bool(p.get("verify", True)), threads, par)
+            self.run = Run(ds, MODES[mode], bool(p.get("verify", True)), threads, par, plan)
         except Exception as e:
             raise Bad(f"Löschprozess konnte nicht gestartet werden: {e}", 500)
 
@@ -1038,7 +1072,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.send(200, dict(ok=True))
             if post and path == "/api/setup":
                 if not (app.busy and isinstance(p.get("items"), list)):
-                    raise Bad("Keine Einrichtung angefragt.", 409)
+                    raise Bad("Der Löschvorgang ist bereits beendet, die Einrichtung ist nicht mehr möglich. "
+                              f"Der Datenträger kann mit {SETUP_TOOL[PLATFORM]} eingerichtet werden.", 409)
                 app.run.answer_setup(p["items"])
                 return self.send(200, dict(ok=True))
             if post and path == "/api/back":
@@ -1169,6 +1204,7 @@ UI_HTML = (
     '      <div class="modes" id="modes" role="radiogroup" aria-label="Löschmethode"></div>\n'
     '      <div class="opts">\n'
     '        <label class="chk"><input type="checkbox" id="o-verify" checked> Danach prüfen (alles zurücklesen)</label>\n'
+    '        <label class="mute">Nach dem Löschen: <select id="o-setup"><option value="auto">Einrichten – empfohlenes Format</option><option value="choose">Einrichten – Format selbst wählen</option><option value="none">Nicht einrichten</option></select></label>\n'
     '        <label class="mute">Mehrere Datenträger: <select id="o-flow"></select></label>\n'
     '        <label class="mute">Leistung: <select id="o-perf"></select></label>\n'
     '      </div>\n'
@@ -1465,8 +1501,12 @@ UI_JS = (
     '}\n'
     '\n'
     '// ───── Bestätigung und Start ─────\n'
-    'function confirmDialog() {\n'
+    'function confirmDialog(plan) {\n'
     '  const sel = selected(), n = sel.length, word = n === 1 ? sel[0].id : String(n), mode = S.info.modes[S.mode];\n'
+    '  const planText = (x) => {\n'
+    '    const it = plan.find((p) => p.id === x.id), f = it && x.setup.fs.find((q) => q.key === it.fs);\n'
+    '    return it ? `Danach: als neues Laufwerk einrichten – ${it.scheme.toUpperCase()}, ${f ? f.name : it.fs}, Name „${it.label}“` : "Danach: nicht einrichten (der Datenträger bleibt leer und im System unsichtbar)";\n'
+    '  };\n'
     '  const verify = $("o-verify").checked, par = n > 1 && $("o-flow").value === "true", d = $("d-confirm");\n'
     '  const input = h("input", { type: "text", autocomplete: "off", spellcheck: "false", "aria-label": "Bestätigung" });\n'
     '  const ok = h("button", { class: "btn danger", type: "button", disabled: true }, "Endgültig löschen");\n'
@@ -1475,7 +1515,7 @@ UI_JS = (
     '  ok.addEventListener("click", async () => {\n'
     '    ok.disabled = true;\n'
     '    try {\n'
-    '      await api("start", { ids: sel.map((x) => x.id), mode: S.mode, verify, threads: Number($("o-perf").value), parallel: par, confirm: input.value });\n'
+    '      await api("start", { ids: sel.map((x) => x.id), mode: S.mode, verify, threads: Number($("o-perf").value), parallel: par, confirm: input.value, setup: plan });\n'
     '      d.close();\n'
     '      S.view = { state: "launching" };\n'
     '      showRun();\n'
@@ -1483,7 +1523,7 @@ UI_JS = (
     '  });\n'
     '  d.replaceChildren(h("div", { class: "dlg" },\n'
     '    h("h3", { class: "red" }, n === 1 ? "Datenträger endgültig löschen?" : `${n} Datenträger endgültig löschen?`),\n'
-    '    h("div", { class: "box" }, sel.flatMap((x) => [h("b", {}, `${x.id}  ·  ${x.model || "Unbekanntes Modell"}  ·  ${x.size_h}`), h("small", {}, "Inhalt: " + (x.volumes.join(", ") || "keine erkennbaren Laufwerke"))]),\n'
+    '    h("div", { class: "box" }, sel.flatMap((x) => [h("b", {}, `${x.id}  ·  ${x.model || "Unbekanntes Modell"}  ·  ${x.size_h}`), h("small", {}, "Inhalt: " + (x.volumes.join(", ") || "keine erkennbaren Laufwerke")), h("small", {}, planText(x))]),\n'
     '      h("small", {}, `Methode: ${mode.name} (${mode.passes.join(" → ")})` + (verify ? "  +  Prüfung" : "") + (n > 1 ? `  ·  ${par ? "gleichzeitig" : "nacheinander"}` : ""))),\n'
     '    h("p", {}, (n === 1 ? "Alle Daten gehen unwiderruflich verloren. " : `Alle Daten auf diesen ${n} Datenträgern gehen unwiderruflich verloren. `)\n'
     '      + (n === 1 ? `Zur Bestätigung „${word}“ eingeben:` : `Zur Bestätigung die Anzahl „${word}“ eingeben:`)),\n'
@@ -1561,10 +1601,11 @@ UI_JS = (
     '}\n'
     '\n'
     '// ───── Einrichtung als Laufwerk ─────\n'
-    'function askSetup(items) {\n'
+    '// Dialog mit Format-Vorschlag je Datenträger; liefert die Wahl (Liste) oder o.decline / o.esc\n'
+    'function pickSetup(items, o) {\n'
     '  return new Promise((resolve) => {\n'
     '    const d = $("d-setup");\n'
-    '    let sent = false;\n'
+    '    let done = false;\n'
     '    const rows = items.map((it) => {\n'
     '      const on = h("input", { type: "checkbox" }), fs = h("select"), sch = h("select"), label = h("input", { type: "text", size: "14", maxlength: "32", "aria-label": "Name" });\n'
     '      const why = h("div", { class: "why" });\n'
@@ -1586,20 +1627,32 @@ UI_JS = (
     '        el: h("div", { class: "sdisk" }, h("label", {}, on, `${it.id}  ·  ${it.model}  ·  ${it.size_h}`),\n'
     '          h("div", { class: "ctl" }, h("label", {}, "Partitionstabelle", sch), h("label", {}, "Dateisystem", fs), h("label", {}, "Name", label)), why) };\n'
     '    });\n'
-    '    const send = async (list) => {\n'
-    '      if (sent) return;\n'
-    '      sent = true;\n'
-    '      try { await api("setup", { items: list }); } catch (e) { /* Worker ist schon fertig */ }\n'
-    '      d.close(); resolve();\n'
+    '    const finish = (v) => {\n'
+    '      if (done) return;\n'
+    '      done = true; d.close(); resolve(v);\n'
     '    };\n'
-    '    d.addEventListener("close", () => send([]), { once: true }); // Esc oder Schließen = nicht einrichten\n'
-    '    d.replaceChildren(h("div", { class: "dlg" }, h("h3", {}, "Als neues Laufwerk einrichten?"),\n'
-    '      h("p", { class: "mute" }, "Gelöschte Datenträger sind leer und im System nicht mehr als Laufwerk sichtbar. Schredder kann sie jetzt neu einrichten (Partitionstabelle und Dateisystem). Das passende Format wurde nach Art und Größe des Datenträgers und nach Betriebssystem erkannt; es lässt sich ändern."),\n'
-    '      rows.map((r) => r.el),\n'
-    '      h("div", { class: "btns" }, h("button", { class: "btn", type: "button", onclick: () => send([]) }, "Nicht einrichten"),\n'
-    '        h("button", { class: "btn primary", type: "button", onclick: () => send(rows.filter((r) => r.on.checked).map((r) => ({ id: r.id, scheme: r.sch.value, fs: r.fs.value, label: r.label.value }))) }, "Einrichten"))));\n'
+    '    d.addEventListener("close", () => finish(o.esc), { once: true }); // Esc oder Schließen\n'
+    '    d.replaceChildren(h("div", { class: "dlg" }, h("h3", {}, o.title), h("p", { class: "mute" }, o.intro), rows.map((r) => r.el),\n'
+    '      h("div", { class: "btns" }, h("button", { class: "btn", type: "button", onclick: () => finish(o.decline) }, o.no),\n'
+    '        h("button", { class: "btn primary", type: "button", onclick: () => finish(rows.filter((r) => r.on.checked).map((r) => ({ id: r.id, scheme: r.sch.value, fs: r.fs.value, label: r.label.value }))) }, o.ok))));\n'
     '    d.showModal();\n'
     '  });\n'
+    '}\n'
+    '\n'
+    '// Rückfrage nach dem Löschen – nur noch, wenn die Einrichtung nicht schon vor dem Start festgelegt wurde\n'
+    'async function askSetup(items) {\n'
+    '  const list = await pickSetup(items, { title: "Als neues Laufwerk einrichten?", ok: "Einrichten", no: "Nicht einrichten", decline: [], esc: [],\n'
+    '    intro: "Gelöschte Datenträger sind leer und im System nicht mehr als Laufwerk sichtbar. Schredder kann sie jetzt neu einrichten (Partitionstabelle und Dateisystem). Das passende Format wurde nach Art und Größe des Datenträgers und nach Betriebssystem erkannt; es lässt sich ändern." });\n'
+    '  try { await api("setup", { items: list }); } catch (e) { msg("Einrichtung nicht möglich", e.message, "OK"); }\n'
+    '}\n'
+    '\n'
+    '// Einrichtung vor dem Start festlegen: null = Vorgang abbrechen\n'
+    'async function planSetup(sel) {\n'
+    '  const how = $("o-setup").value;\n'
+    '  if (how === "none") return [];\n'
+    '  if (how === "auto") return sel.map((d) => ({ id: d.id, scheme: d.setup.rec.scheme, fs: d.setup.rec.fs, label: d.setup.label }));\n'
+    '  return pickSetup(sel.map((d) => d.setup), { title: "Format für die neuen Laufwerke wählen", ok: "Weiter", no: "Abbrechen", decline: null, esc: null,\n'
+    '    intro: "Nach dem Löschen richtet Schredder die Datenträger so ein. Die Vorschläge richten sich nach Art, Größe und Betriebssystem; abgewählte Datenträger bleiben leer." });\n'
     '}\n'
     '\n'
     '// ───── Protokoll, Verbindung, Start ─────\n'
@@ -1629,7 +1682,10 @@ UI_JS = (
     '  renderModes();\n'
     '  $("b-all").addEventListener("click", () => { S.sel = new Set(S.disks.filter((d) => !d.locked).map((d) => d.id)); S.peek = null; renderDisks(); updateSel(); });\n'
     '  $("b-refresh").addEventListener("click", scan);\n'
-    '  $("b-go").addEventListener("click", confirmDialog);\n'
+    '  $("b-go").addEventListener("click", async () => {\n'
+    '    const plan = await planSetup(selected());\n'
+    '    if (plan) confirmDialog(plan);\n'
+    '  });\n'
     '  $("b-cancel").addEventListener("click", async () => {\n'
     '    if (!(await msg("Löschvorgang abbrechen?", "Bereits begonnene Datenträger bleiben teilweise überschrieben.", "Ja, abbrechen", "Weiter löschen"))) return;\n'
     '    try { await api("cancel", {}); } catch (e) { msg("Abbrechen nicht möglich", e.message, "OK"); }\n'
