@@ -1,0 +1,11 @@
+* text=auto
+*.py text eol=lf
+*.sh text eol=lf
+*.command text eol=lf
+*.bat text eol=crlf
+*.png binary
+
+# von build.py erzeugt: auf GitHub eingeklappt und nicht in der Sprachstatistik
+win/schredder.py linguist-generated=true
+macos/schredder.py linguist-generated=true
+linux/schredder.py linguist-generated=true

@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Schredder – Datenträger sicher löschen</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f172a'/%3E%3Crect x='5' y='6' width='22' height='8' fill='%23f8fafc'/%3E%3Cpath d='M7 17h2v9H7zM12 17h2v9h-2zM17 17h2v9h-2zM22 17h2v9h-2z' fill='%2360a5fa'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 46 46" aria-hidden="true"><rect x="5" y="7" width="36" height="14" fill="#f8fafc"/><g fill="#60a5fa"><rect x="8" y="25" width="3" height="16"/><rect x="14" y="25" width="3" height="16"/><rect x="20" y="25" width="3" height="16"/><rect x="26" y="25" width="3" height="16"/><rect x="32" y="25" width="3" height="16"/><rect x="38" y="25" width="3" height="16"/></g></svg>
+    <div><h1>Schredder</h1><p>Datenträger sicher und schnell löschen</p></div>
+  </div>
+  <div class="meta"><span id="ver"></span><span id="rights"></span></div>
+</header>
+
+<main>
+  <p class="warn">Achtung: Alle Daten auf den gewählten Datenträgern werden unwiderruflich überschrieben und lassen sich nicht wiederherstellen.</p>
+  <p class="warn" id="offline" hidden>Die Verbindung zu Schredder wurde unterbrochen. Bitte das Programm neu starten.</p>
+
+  <section id="v-select" class="stack">
+    <article class="card">
+      <div class="card-h">
+        <h2><span class="n">1</span> Datenträger wählen</h2>
+        <div class="tools"><span id="scan-info" class="mute"></span><button class="btn" id="b-all" type="button">Alle auswählen</button><button class="btn" id="b-refresh" type="button">Aktualisieren</button></div>
+      </div>
+      <div class="tablewrap">
+        <table class="disks" id="disks">
+          <thead><tr><th><span class="sr" hidden>Auswahl</span></th><th>Name</th><th>Modell</th><th class="r">Größe</th><th>Typ</th><th>Inhalt / Status</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="detail mute" id="detail"></p>
+    </article>
+
+    <article class="card">
+      <div class="card-h"><h2><span class="n">2</span> Löschmethode</h2></div>
+      <div class="modes" id="modes" role="radiogroup" aria-label="Löschmethode"></div>
+      <div class="opts">
+        <label class="chk"><input type="checkbox" id="o-verify" checked> Danach prüfen (alles zurücklesen)</label>
+        <label class="mute">Mehrere Datenträger: <select id="o-flow"></select></label>
+        <label class="mute">Leistung: <select id="o-perf"></select></label>
+      </div>
+    </article>
+  </section>
+
+  <section id="v-run" hidden>
+    <article class="card">
+      <div class="card-h"><h2 id="r-title"></h2><div class="tools"><span class="pct" id="r-pct"></span><button class="btn" id="b-cancel" type="button">Abbrechen</button></div></div>
+      <p class="phase" id="r-phase"></p>
+      <div class="meter" id="r-meter"><i></i></div>
+      <dl class="stats">
+        <div><dt>Geschwindigkeit</dt><dd id="s-speed">–</dd></div>
+        <div><dt>Durchschnitt</dt><dd id="s-avg">–</dd></div>
+        <div><dt>Vergangen</dt><dd id="s-el">–</dd></div>
+        <div><dt>Verbleibend</dt><dd id="s-eta">–</dd></div>
+        <div><dt>Verarbeitet</dt><dd id="s-done">–</dd></div>
+      </dl>
+      <div class="rows" id="r-rows"></div>
+      <canvas id="r-chart" aria-label="Geschwindigkeitsverlauf"></canvas>
+      <div id="r-result" hidden>
+        <div class="banner" id="r-banner"></div>
+        <div class="btns"><button class="btn" id="b-report" type="button">Protokoll speichern …</button><button class="btn" id="b-back" type="button">Zurück</button></div>
+      </div>
+      <p class="note" id="r-note" hidden></p>
+    </article>
+  </section>
+</main>
+
+<footer class="bar" id="bar">
+  <span id="hint"></span>
+  <button class="btn danger" id="b-go" type="button" disabled>Datenträger löschen …</button>
+</footer>
+<p class="about" id="about"></p>
+
+<dialog id="d-confirm"></dialog>
+<dialog id="d-setup"></dialog>
+<dialog id="d-msg"></dialog>
+<script src="/app.js"></script>
+</body>
+</html>

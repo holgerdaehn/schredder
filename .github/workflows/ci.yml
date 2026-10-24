@@ -1,0 +1,38 @@
+# Läuft nur auf den Standard-Runnern von GitHub Actions: für öffentliche Repositories kostenlos, auch mit Free-Konto.
+# Bei einem privaten Repository zählen die Minuten gegen das Free-Kontingent (2.000 Min/Monat, macOS zählt 10-fach) –
+# dann den Eintrag macos-latest unter matrix.os streichen.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**", "LICENSE"]
+  pull_request:
+    paths-ignore: ["**.md", "docs/**", "LICENSE"]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} · Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.9", "3.x"]  # kleinste unterstützte und jeweils neueste stabile Version
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Generierte Dateien aktuell?
+        run: python build.py --check
+      - name: Statische Prüfung
+        run: pip install pyflakes && python -m pyflakes build.py tests win/schredder.py macos/schredder.py linux/schredder.py
+      - name: Tests (Engine, Worker und Weboberfläche auf dem Build dieses Systems; veraltete Funktionen gelten als Fehler)
+        run: python -W error::DeprecationWarning -W error::PendingDeprecationWarning tests/test_schredder.py -v
